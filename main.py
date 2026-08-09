@@ -1,13 +1,15 @@
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, field_validator
 
 
 load_dotenv()
 
 from repository import repository
+from auth_service import AuthError, auth_service
 
 
 app = FastAPI(
@@ -15,6 +17,13 @@ app = FastAPI(
     version="1.0",
     description="A PostgreSQL-backed CRUD API for managing to-do tasks.",
 )
+bearer = HTTPBearer(auto_error=False)
+
+
+class AccessError(Exception):
+    def __init__(self, message: str, status_code: int = 401) -> None:
+        self.message = message
+        self.status_code = status_code
 
 
 class Task(BaseModel):
@@ -47,6 +56,31 @@ class TaskUpdate(BaseModel):
         return title.strip()
 
 
+class Credentials(BaseModel):
+    email: str
+    password: str
+
+    @field_validator("email", "password")
+    @classmethod
+    def validate_credentials(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("field must not be empty")
+        return value
+
+
+class RefreshToken(BaseModel):
+    refresh_token: str
+
+    @field_validator("refresh_token")
+    @classmethod
+    def validate_refresh_token(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("refresh_token must not be empty")
+        return value
+
+
 repository.initialize()
 
 
@@ -64,6 +98,28 @@ async def handle_validation_error(_, exc: RequestValidationError) -> JSONRespons
     )
 
 
+@app.exception_handler(AccessError)
+async def handle_access_error(_, exc: AccessError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.message},
+    )
+
+
+def current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+) -> dict:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise AccessError("Access token required")
+    try:
+        user = auth_service.user(credentials.credentials)
+        return {**user, "_access_token": credentials.credentials}
+    except AuthError as exc:
+        if exc.status_code == 503:
+            raise AccessError(exc.message, 503) from exc
+        raise AccessError("Invalid or expired token") from exc
+
+
 @app.get("/", tags=["System"])
 def root() -> dict[str, str | list[str]]:
     return {"name": "Task API", "version": "1.0", "endpoints": ["/tasks"]}
@@ -72,6 +128,89 @@ def root() -> dict[str, str | list[str]]:
 @app.get("/health", tags=["System"])
 def health() -> dict[str, str]:
     return {"status": "ok", "db": "ok" if repository.health() else "error"}
+
+
+@app.post("/auth/signup", status_code=201, tags=["Authentication"])
+def signup(payload: Credentials) -> dict:
+    try:
+        result = auth_service.signup(payload.email, payload.password)
+    except AuthError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.message})
+    return result.get("user", result)
+
+
+@app.post("/auth/login", tags=["Authentication"])
+def login(payload: Credentials) -> dict:
+    try:
+        result = auth_service.login(payload.email, payload.password)
+    except AuthError as exc:
+        if exc.status_code == 503:
+            return JSONResponse(status_code=503, content={"error": exc.message})
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid login credentials"},
+        )
+    return {
+        "access_token": result["access_token"],
+        "refresh_token": result["refresh_token"],
+        "token_type": "bearer",
+    }
+
+
+@app.post("/auth/refresh", tags=["Authentication"])
+def refresh(payload: RefreshToken) -> dict:
+    try:
+        result = auth_service.refresh(payload.refresh_token)
+    except AuthError as exc:
+        if exc.status_code == 503:
+            return JSONResponse(status_code=503, content={"error": exc.message})
+        return JSONResponse(
+            status_code=401,
+            content={"error": "Invalid refresh token"},
+        )
+    return {
+        "access_token": result["access_token"],
+        "refresh_token": result["refresh_token"],
+        "token_type": "bearer",
+    }
+
+
+@app.get("/public/info", tags=["Public"])
+def public_info() -> dict[str, str]:
+    return {"message": "Welcome stranger! This info is public."}
+
+
+@app.get("/protected/profile", tags=["Protected"])
+def protected_profile(user: dict = Depends(current_user)) -> dict:
+    return {
+        "id": user.get("id"),
+        "email": user.get("email"),
+        "created_at": user.get("created_at"),
+    }
+
+
+@app.get("/protected/dashboard", tags=["Protected"])
+def protected_dashboard(user: dict = Depends(current_user)) -> dict:
+    return {"message": f"Welcome {user.get('email')}", "user_id": user.get("id")}
+
+
+@app.get("/protected/admin", tags=["Protected"])
+def protected_admin(user: dict = Depends(current_user)) -> dict:
+    role = user.get("app_metadata", {}).get("role")
+    if role != "admin":
+        raise AccessError("Admin access required", 403)
+    return {"message": "Welcome admin"}
+
+
+@app.post("/auth/logout", status_code=204, tags=["Authentication"])
+def logout(user: dict = Depends(current_user)) -> Response:
+    try:
+        auth_service.logout(user["_access_token"])
+    except AuthError as exc:
+        if exc.status_code == 503:
+            raise AccessError(exc.message, 503) from exc
+        raise AccessError("Invalid or expired token") from exc
+    return Response(status_code=204)
 
 
 @app.get("/tasks", response_model=list[Task], tags=["Tasks"])
