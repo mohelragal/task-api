@@ -1,3 +1,7 @@
+import sqlite3
+import subprocess
+import sys
+
 from fastapi.testclient import TestClient
 
 from main import app
@@ -52,7 +56,7 @@ def test_validation_and_not_found_errors() -> None:
     assert client.post("/tasks", json={}).status_code == 400
     assert client.post("/tasks", json={"title": "   "}).status_code == 400
     assert client.put("/tasks/1", json={}).status_code == 400
-    assert client.get("/tasks/99").json() == {"error": "Task 99 not found"}
+    assert client.get("/tasks/99").json() == {"error": "Task not found"}
     assert client.put("/tasks/99", json={"done": True}).status_code == 404
     assert client.delete("/tasks/99").status_code == 404
 
@@ -64,3 +68,29 @@ def test_extras() -> None:
     assert len(search_results) == 1
     assert "Swagger" in search_results[0]["title"]
     assert client.get("/stats").json() == {"total": 3, "done": 1, "open": 2}
+
+
+def test_sqlite_persistence_and_safe_parameters() -> None:
+    reset()
+    title = "Don't delete'; DROP TABLE tasks; --"
+    created = client.post("/tasks", json={"title": title})
+    assert created.status_code == 201
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sqlite3; c=sqlite3.connect('tasks.db'); print(c.execute('SELECT title FROM tasks WHERE id = ?', (4,)).fetchone()[0])",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == title
+
+    with sqlite3.connect("tasks.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 4
+        assert connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_tasks_done",),
+        ).fetchone()[0] == 1

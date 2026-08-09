@@ -2,3 +2,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.pyc
+tasks.db
+tasks.db-shm
+tasks.db-wal
+ai_tasks.db
