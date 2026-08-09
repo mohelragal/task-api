@@ -41,6 +41,13 @@ class TaskRepository:
     def value(self, row: Any) -> Any:
         return next(iter(row.values())) if isinstance(row, dict) else row[0]
 
+    def execute_many(self, connection: Any, query: str, parameters: list[tuple]) -> None:
+        if self.sqlite:
+            connection.executemany(self.sql(query), parameters)
+        else:
+            with connection.cursor() as cursor:
+                cursor.executemany(query, parameters)
+
     def initialize(self) -> None:
         id_column = "INTEGER PRIMARY KEY AUTOINCREMENT" if self.sqlite else "SERIAL PRIMARY KEY"
         with self.connection() as connection:
@@ -50,8 +57,9 @@ class TaskRepository:
             connection.execute("CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done)")
             count = self.value(connection.execute("SELECT COUNT(*) FROM tasks").fetchone())
             if count == 0:
-                connection.executemany(
-                    self.sql("INSERT INTO tasks (title, done) VALUES (%s, %s)"),
+                self.execute_many(
+                    connection,
+                    "INSERT INTO tasks (title, done) VALUES (%s, %s)",
                     SEED_TASKS,
                 )
 
@@ -131,8 +139,9 @@ class TaskRepository:
                 connection.execute("DELETE FROM sqlite_sequence WHERE name = ?", ("tasks",))
             else:
                 connection.execute("ALTER SEQUENCE tasks_id_seq RESTART WITH 1")
-            connection.executemany(
-                self.sql("INSERT INTO tasks (title, done) VALUES (%s, %s)"),
+            self.execute_many(
+                connection,
+                "INSERT INTO tasks (title, done) VALUES (%s, %s)",
                 SEED_TASKS,
             )
         return self.list_tasks()
