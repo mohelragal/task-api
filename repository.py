@@ -74,7 +74,7 @@ class TaskRepository:
             clauses.append("done = %s")
             parameters.append(done)
         if search:
-            clauses.append("title LIKE %s")
+            clauses.append(f"title {'LIKE' if self.sqlite else 'ILIKE'} %s")
             parameters.append(f"%{search}%")
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         with self.connection() as connection:
