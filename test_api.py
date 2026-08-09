@@ -21,7 +21,7 @@ def test_system_endpoints_and_docs() -> None:
         "version": "1.0",
         "endpoints": ["/tasks"],
     }
-    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health").json() == {"status": "ok", "db": "ok"}
     assert client.get("/docs").status_code == 200
     assert client.get("/openapi.json").status_code == 200
 

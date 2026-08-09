@@ -1,16 +1,19 @@
-import sqlite3
-from pathlib import Path
-
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, field_validator
 
 
+load_dotenv()
+
+from repository import repository
+
+
 app = FastAPI(
     title="Task API",
     version="1.0",
-    description="A SQLite-backed CRUD API for managing to-do tasks.",
+    description="A PostgreSQL-backed CRUD API for managing to-do tasks.",
 )
 
 
@@ -44,59 +47,11 @@ class TaskUpdate(BaseModel):
         return title.strip()
 
 
-DATABASE_PATH = Path("tasks.db")
-SEED_TASKS = [
-    Task(id=1, title="Learn HTTP basics", done=True),
-    Task(id=2, title="Build a CRUD API"),
-    Task(id=3, title="Test with Swagger UI"),
-]
+repository.initialize()
 
 
-def connect() -> sqlite3.Connection:
-    connection = sqlite3.connect(DATABASE_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
-def initialize_database() -> None:
-    with connect() as connection:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                done INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1))
-            )
-            """
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done)"
-        )
-        count = connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
-        if count == 0:
-            connection.executemany(
-                "INSERT INTO tasks (title, done) VALUES (?, ?)",
-                [(task.title, int(task.done)) for task in SEED_TASKS],
-            )
-
-
-initialize_database()
-
-
-def find_task(task_id: int) -> Task | None:
-    with connect() as connection:
-        row = connection.execute(
-            "SELECT id, title, done FROM tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-    return Task(**dict(row)) if row else None
-
-
-def not_found(task_id: int) -> JSONResponse:
-    return JSONResponse(
-        status_code=404,
-        content={"error": "Task not found"},
-    )
+def not_found() -> JSONResponse:
+    return JSONResponse(status_code=404, content={"error": "Task not found"})
 
 
 @app.exception_handler(RequestValidationError)
@@ -116,50 +71,29 @@ def root() -> dict[str, str | list[str]]:
 
 @app.get("/health", tags=["System"])
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "db": "ok" if repository.health() else "error"}
 
 
 @app.get("/tasks", response_model=list[Task], tags=["Tasks"])
-def list_tasks(done: bool | None = None, search: str | None = None) -> list[Task]:
-    clauses = []
-    parameters = []
-    if done is not None:
-        clauses.append("done = ?")
-        parameters.append(int(done))
-    if search:
-        clauses.append("title LIKE ?")
-        parameters.append(f"%{search}%")
-    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    with connect() as connection:
-        rows = connection.execute(
-            f"SELECT id, title, done FROM tasks{where} ORDER BY id",
-            parameters,
-        ).fetchall()
-    return [Task(**dict(row)) for row in rows]
+def list_tasks(done: bool | None = None, search: str | None = None) -> list[dict]:
+    return repository.list_tasks(done, search)
 
 
 @app.get("/tasks/{task_id}", response_model=Task, tags=["Tasks"])
-def get_task(task_id: int) -> Task | Response:
-    return find_task(task_id) or not_found(task_id)
+def get_task(task_id: int) -> dict | Response:
+    return repository.get(task_id) or not_found()
 
 
 @app.post("/tasks", response_model=Task, status_code=201, tags=["Tasks"])
-def create_task(payload: TaskCreate) -> Task:
-    with connect() as connection:
-        cursor = connection.execute(
-            "INSERT INTO tasks (title, done) VALUES (?, ?)",
-            (payload.title, 0),
-        )
-    task = find_task(cursor.lastrowid)
-    assert task is not None
-    return task
+def create_task(payload: TaskCreate) -> dict:
+    return repository.create(payload.title)
 
 
 @app.put("/tasks/{task_id}", response_model=Task, tags=["Tasks"])
-def update_task(task_id: int, payload: TaskUpdate) -> Task | Response:
-    task = find_task(task_id)
+def update_task(task_id: int, payload: TaskUpdate) -> dict | Response:
+    task = repository.get(task_id)
     if task is None:
-        return not_found(task_id)
+        return not_found()
     if not payload.model_fields_set:
         return JSONResponse(
             status_code=400,
@@ -170,43 +104,23 @@ def update_task(task_id: int, payload: TaskUpdate) -> Task | Response:
             status_code=400,
             content={"error": "done must be true or false"},
         )
-    title = payload.title if "title" in payload.model_fields_set else task.title
-    done = payload.done if "done" in payload.model_fields_set else task.done
-    with connect() as connection:
-        connection.execute(
-            "UPDATE tasks SET title = ?, done = ? WHERE id = ?",
-            (title, int(done), task_id),
-        )
-    updated = find_task(task_id)
-    assert updated is not None
-    return updated
+    title = payload.title if "title" in payload.model_fields_set else task["title"]
+    done = payload.done if "done" in payload.model_fields_set else task["done"]
+    return repository.update(task_id, title, done)
 
 
 @app.delete("/tasks/{task_id}", status_code=204, tags=["Tasks"])
 def delete_task(task_id: int) -> Response:
-    with connect() as connection:
-        cursor = connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-    if cursor.rowcount == 0:
-        return not_found(task_id)
+    if not repository.delete(task_id):
+        return not_found()
     return Response(status_code=204)
 
 
 @app.get("/stats", tags=["Tasks"])
 def task_stats() -> dict[str, int]:
-    with connect() as connection:
-        total, done = connection.execute(
-            "SELECT COUNT(*), COALESCE(SUM(done), 0) FROM tasks"
-        ).fetchone()
-    return {"total": total, "done": done, "open": total - done}
+    return repository.stats()
 
 
 @app.post("/reset", response_model=list[Task], tags=["Tasks"])
-def reset_tasks() -> list[Task]:
-    with connect() as connection:
-        connection.execute("DELETE FROM tasks")
-        connection.execute("DELETE FROM sqlite_sequence WHERE name = ?", ("tasks",))
-        connection.executemany(
-            "INSERT INTO tasks (title, done) VALUES (?, ?)",
-            [(task.title, int(task.done)) for task in SEED_TASKS],
-        )
-    return list_tasks()
+def reset_tasks() -> list[dict]:
+    return repository.reset()
