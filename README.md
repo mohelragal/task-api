@@ -60,7 +60,7 @@ content-type: application/json
 
 ## Swagger UI
 
-![Task API Swagger UI](images/swagger-ui.png)
+![Task API Swagger UI](images/swagger-ui.svg)
 
 ## Test
 
