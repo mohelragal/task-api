@@ -1,5 +1,7 @@
 # Task API
 
+Week 5's polite scraping pipeline is available in [`scraper/`](scraper/README.md). It collects exactly three Books to Scrape catalogue pages, validates 60 unique records, survives a deliberate broken URL, and publishes reproducible JSON evidence.
+
 A FastAPI project that combines the earlier task CRUD API with Supabase authentication, reusable bearer-token protection, PostgreSQL, and Docker Compose. It was built for FlyRank Backend Assignment A4.
 
 ## Authentication flow
